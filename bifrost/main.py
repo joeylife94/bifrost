@@ -440,6 +440,142 @@ def _read_input(file_path: Optional[Path]) -> str:
             return sys.stdin.read()
 
 
+@app.command()
+def filter_log(
+    file: typer.FileText = typer.Argument(..., help="로그 파일"),
+    severity: str = typer.Option("INFO", help="최소 심각도 (DEBUG/INFO/WARN/ERROR/FATAL)"),
+    errors_only: bool = typer.Option(False, "--errors-only", help="에러만 추출"),
+    output: Optional[typer.FileTextWrite] = typer.Option(None, help="출력 파일"),
+):
+    """로그 필터링
+    
+    예시:
+    \b
+    - bifrost filter-log app.log --severity ERROR
+    - bifrost filter-log app.log --errors-only
+    - bifrost filter-log app.log --severity WARN --output filtered.log
+    """
+    from bifrost.filters import LogFilter, SeverityLevel
+    from datetime import datetime
+    
+    log_content = file.read()
+    
+    if errors_only:
+        filtered = LogFilter.extract_errors_only(log_content)
+    else:
+        try:
+            min_level = SeverityLevel(severity.upper())
+            filtered = LogFilter.filter_by_severity(log_content, min_level)
+        except ValueError:
+            console.print(f"[red]Invalid severity level: {severity}[/red]")
+            console.print("Valid values: TRACE, DEBUG, INFO, WARN, ERROR, FATAL")
+            raise typer.Exit(1)
+    
+    # 통계 출력
+    stats = LogFilter.get_log_statistics(filtered)
+    console.print(f"\n📊 Filtered Log Statistics:", style="bold")
+    console.print(f"Total lines: {stats['total_lines']}")
+    console.print(f"By severity: {stats['by_severity']}")
+    
+    # 결과 출력
+    if output:
+        output.write(filtered)
+        console.print(f"\n✅ Filtered log saved to: {output.name}", style="green")
+    else:
+        console.print(f"\n{filtered}")
+
+
+@app.command()
+def export(
+    format: str = typer.Option("csv", help="Export 포맷 (csv/json)"),
+    limit: int = typer.Option(100, help="Export할 레코드 수"),
+    output: Optional[str] = typer.Option(None, help="출력 파일명"),
+):
+    """분석 결과 export
+    
+    예시:
+    \b
+    - bifrost export --format csv --limit 50
+    - bifrost export --format json --output results.json
+    """
+    from bifrost.database import Database
+    from bifrost.export import DataExporter
+    from datetime import datetime
+    
+    config = Config()
+    db = Database(config.get("database.url", "sqlite:///bifrost.db"))
+    
+    results = db.get_analysis_history(limit=limit)
+    
+    if not results:
+        console.print("[yellow]No analysis results found[/yellow]")
+        raise typer.Exit(0)
+    
+    # Export
+    if format == "csv":
+        content = DataExporter.to_csv(results)
+        default_filename = f"bifrost_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    elif format == "json":
+        content = DataExporter.to_json(results, pretty=True)
+        default_filename = f"bifrost_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    else:
+        console.print(f"[red]Invalid format: {format}[/red]")
+        console.print("Valid formats: csv, json")
+        raise typer.Exit(1)
+    
+    output_file = output or default_filename
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(content)
+    
+    console.print(f"✅ Exported {len(results)} results to: {output_file}", style="green")
+
+
+@app.command()
+def slack(
+    webhook_url: str = typer.Option(..., help="Slack Webhook URL"),
+    file: Optional[typer.FileText] = typer.Option(None, help="로그 파일"),
+    message: Optional[str] = typer.Option(None, help="직접 메시지"),
+    service_name: Optional[str] = typer.Option(None, help="서비스명"),
+):
+    """Slack으로 알림 전송
+    
+    예시:
+    \b
+    - bifrost slack --webhook-url https://hooks.slack.com/... --file app.log
+    - bifrost slack --webhook-url https://hooks.slack.com/... --message "Deploy failed"
+    """
+    from bifrost.slack import SlackNotifier
+    
+    notifier = SlackNotifier(webhook_url)
+    
+    if file:
+        # 로그 분석 후 전송
+        log_content = file.read()
+        
+        preprocessor = LogPreprocessor()
+        processed = preprocessor.process(log_content)
+        
+        client = OllamaClient()
+        result = client.analyze(processed)
+        
+        success = notifier.send_analysis_result(result, service_name)
+    
+    elif message:
+        # 에러 메시지 전송
+        success = notifier.send_error_alert(message, service_name)
+    
+    else:
+        console.print("[red]Either --file or --message is required[/red]")
+        raise typer.Exit(1)
+    
+    if success:
+        console.print("✅ Slack 전송 성공!", style="green")
+    else:
+        console.print("❌ Slack 전송 실패", style="red")
+        raise typer.Exit(1)
+
+
 def main():
     app()
 

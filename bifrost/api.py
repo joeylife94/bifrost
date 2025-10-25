@@ -4,9 +4,10 @@ import time
 from typing import Optional, List
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, WebSocket, WebSocketDisconnect, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from bifrost.ollama import OllamaClient
@@ -18,6 +19,9 @@ from bifrost.logger import logger
 from bifrost.ratelimit import RateLimiter
 from bifrost.exceptions import BifrostException, RateLimitError, handle_exception
 from bifrost.validators import InputValidator
+from bifrost.filters import LogFilter, SeverityLevel
+from bifrost.export import DataExporter
+from bifrost.slack import SlackNotifier
 
 # FastAPI 앱
 app = FastAPI(
@@ -352,6 +356,195 @@ async def startup_event():
 async def shutdown_event():
     """서버 종료 시"""
     print("👋 Bifrost API Server shutting down...")
+
+
+# ==================== 새로운 기능 엔드포인트 ====================
+
+@app.get("/", response_class=HTMLResponse)
+async def web_ui():
+    """웹 UI (htmx)"""
+    try:
+        with open("static/index.html", "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "<h1>Web UI not found. Please check static/index.html</h1>"
+
+
+@app.post("/api/analyze-web")
+async def analyze_web(
+    log_content: str = Form(...),
+    source: str = Form("local"),
+    severity: str = Form(None),
+    service_name: str = Form(None),
+    environment: str = Form(None),
+):
+    """웹 UI용 분석 엔드포인트 (Form 데이터)"""
+    try:
+        # 심각도 필터링
+        filtered_log = log_content
+        if severity:
+            filtered_log = LogFilter.filter_by_severity(
+                log_content,
+                min_level=SeverityLevel(severity)
+            )
+        
+        # 분석 실행
+        preprocessor = LogPreprocessor()
+        processed_log = preprocessor.process(filtered_log)
+        
+        if source == "local":
+            client = OllamaClient()
+        else:
+            client = BedrockClient()
+        
+        result = client.analyze(processed_log)
+        
+        # DB 저장
+        db = get_database()
+        analysis_id = db.save_analysis(
+            log_content=log_content,
+            response=result.get("response", ""),
+            source=source,
+            service_name=service_name,
+            environment=environment,
+        )
+        
+        # HTML 응답
+        html = f"""
+        <div class="result">
+            <div class="alert alert-success">
+                ✅ 분석 완료! (ID: {analysis_id})
+            </div>
+            <h3>📊 분석 결과</h3>
+            <pre>{result.get('response', 'No response')}</pre>
+            
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="number">{result.get('model', 'N/A')}</div>
+                    <div class="label">모델</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number">{source}</div>
+                    <div class="label">소스</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number">{service_name or 'N/A'}</div>
+                    <div class="label">서비스</div>
+                </div>
+            </div>
+        </div>
+        """
+        
+        return HTMLResponse(content=html)
+    
+    except Exception as e:
+        error_html = f"""
+        <div class="result">
+            <div class="alert alert-error">
+                ❌ 에러 발생: {str(e)}
+            </div>
+        </div>
+        """
+        return HTMLResponse(content=error_html, status_code=400)
+
+
+@app.get("/api/export/csv")
+async def export_csv(
+    limit: int = 100,
+    api_key: str = Depends(verify_api_key)
+):
+    """분석 결과를 CSV로 export"""
+    db = get_database()
+    results = db.get_analysis_history(limit=limit)
+    
+    csv_content = DataExporter.to_csv(results)
+    
+    return StreamingResponse(
+        iter([csv_content]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename=bifrost_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+        }
+    )
+
+
+@app.get("/api/export/json")
+async def export_json(
+    limit: int = 100,
+    pretty: bool = True,
+    api_key: str = Depends(verify_api_key)
+):
+    """분석 결과를 JSON으로 export"""
+    db = get_database()
+    results = db.get_analysis_history(limit=limit)
+    
+    json_content = DataExporter.to_json(results, pretty=pretty)
+    
+    return StreamingResponse(
+        iter([json_content]),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f"attachment; filename=bifrost_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+        }
+    )
+
+
+@app.post("/api/filter/severity")
+async def filter_by_severity(
+    log_content: str = Field(..., description="로그 내용"),
+    min_level: SeverityLevel = Field(SeverityLevel.INFO, description="최소 심각도"),
+    api_key: str = Depends(verify_api_key)
+):
+    """심각도로 필터링"""
+    filtered = LogFilter.filter_by_severity(log_content, min_level)
+    stats = LogFilter.get_log_statistics(filtered)
+    
+    return {
+        "filtered_log": filtered,
+        "statistics": stats
+    }
+
+
+@app.post("/api/filter/errors")
+async def filter_errors_only(
+    log_content: str = Field(..., description="로그 내용"),
+    api_key: str = Depends(verify_api_key)
+):
+    """에러만 추출"""
+    filtered = LogFilter.extract_errors_only(log_content)
+    
+    return {
+        "filtered_log": filtered,
+        "line_count": len(filtered.split('\n'))
+    }
+
+
+@app.post("/api/slack/send")
+async def send_to_slack(
+    webhook_url: str = Field(..., description="Slack Webhook URL"),
+    result: dict = Field(..., description="분석 결과"),
+    service_name: Optional[str] = None,
+    api_key: str = Depends(verify_api_key)
+):
+    """분석 결과를 Slack으로 전송"""
+    slack = SlackNotifier(webhook_url)
+    success = slack.send_analysis_result(result, service_name)
+    
+    return {
+        "success": success,
+        "message": "Slack 전송 성공" if success else "Slack 전송 실패"
+    }
+
+
+@app.get("/api/log/stats")
+async def get_log_statistics(
+    log_content: str,
+    api_key: str = Depends(verify_api_key)
+):
+    """로그 통계"""
+    stats = LogFilter.get_log_statistics(log_content)
+    
+    return stats
 
 
 if __name__ == "__main__":

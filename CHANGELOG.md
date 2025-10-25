@@ -1,55 +1,92 @@
-# 🎯 고도화 완료!
+# Changelog
 
-## ✅ 방금 추가한 기능들
+All notable changes to Bifrost will be documented in this file.
 
-### 1. 프로덕션 보안 & 안정성 강화
+## [0.2.1] - 2024-01-XX - "Quick Wins Release"
 
-#### 🔒 Rate Limiting
-```python
-# bifrost/ratelimit.py
-- 토큰 버킷 알고리즘
-- 슬라이딩 윈도우 Rate Limiter
-- API 키별 시간당 100 요청 제한
-```
+### ✨ Added
+- **Web UI**: Modern htmx-based interface with gradient purple design
+  - Real-time form submission without page reload
+  - Tabs for analyze/history/stats
+  - Loading indicators and animations
+  - Severity filter dropdown
+  - Service name and environment fields
 
-#### ✅ 입력 검증
-```python
-# bifrost/validators.py
-- 로그 크기 검증 (10MB 제한)
-- 서비스명 형식 검증
-- XSS 방지 새니타이징
-- 태그 개수 제한
-```
+- **Slack Integration** (`bifrost/slack.py`)
+  - SlackNotifier class with webhook support
+  - Analysis result formatting with Slack Block Kit
+  - Error alert formatting
+  - Service name metadata in notifications
+  - CLI command: `bifrost slack --webhook-url URL --file app.log`
 
-#### 🚨 에러 핸들링
-```python
-# bifrost/exceptions.py
-- 커스텀 예외 계층 (BifrostException)
-- OllamaConnectionError
-- BedrockAuthError
-- RateLimitError
-- ValidationError
-- DatabaseError
-```
+- **Data Export** (`bifrost/export.py`)
+  - CSV export with customizable fields
+  - JSON export (pretty/compact modes)
+  - Markdown table generation
+  - HTML table generation
+  - CLI commands: `bifrost export --format csv/json`
+  - API endpoints: `/api/export/csv` and `/api/export/json`
 
-#### 📝 구조화된 로깅
-```python
-# bifrost/logger.py
-- JSON 구조화 로거
-- 타임스탬프, 레벨, 메시지 자동 포함
-- 쉬운 로그 분석
-```
+- **Log Filtering** (`bifrost/filters.py`)
+  - Severity-based filtering (TRACE/DEBUG/INFO/WARN/ERROR/FATAL)
+  - Keyword filtering (case-sensitive/insensitive)
+  - Time range filtering
+  - Errors-only extraction
+  - Log statistics (line counts by severity)
+  - CLI command: `bifrost filter-log app.log --severity ERROR`
 
-### 2. 성능 최적화
+- **New API Endpoints**
+  - `GET /` - Web UI serving
+  - `POST /api/analyze-web` - Form-based analysis for htmx
+  - `POST /api/filter/severity` - Severity filtering
+  - `POST /api/filter/errors` - Error extraction
+  - `POST /api/slack/send` - Slack notification
+  - `GET /api/log/stats` - Log statistics
 
-#### ⚡ 파일 기반 캐시
-```python
-# bifrost/cache.py
-- .cache/ 디렉토리에 JSON 저장
-- TTL 24시간
-- SHA256 해시 키
-- 만료된 캐시 자동 정리
-```
+### 🔧 Changed
+- Updated README.md with new features documentation
+- Enhanced API imports with new modules
+- Improved CLI help messages
+
+---
+
+## [0.2.0] - 2024-01-XX - "Production-Grade Platform"
+
+### ✨ Added
+
+### ✨ Added
+
+#### 🔒 Production Security & Stability
+- **Rate Limiting** (`bifrost/ratelimit.py`)
+  - Token bucket algorithm
+  - Sliding window rate limiter
+  - 100 requests/hour per API key
+
+- **Input Validation** (`bifrost/validators.py`)
+  - Log size validation (10MB limit)
+  - Service name format validation
+  - XSS prevention sanitization
+  - Tag count limits
+
+- **Error Handling** (`bifrost/exceptions.py`)
+  - Custom exception hierarchy (BifrostException)
+  - OllamaConnectionError
+  - BedrockAuthError
+  - RateLimitError
+  - ValidationError
+  - DatabaseError
+
+- **Structured Logging** (`bifrost/logger.py`)
+  - JSON structured logger
+  - Auto-inclusion of timestamp, level, message
+  - Elasticsearch compatible
+
+#### ⚡ Performance Optimization
+- **File-based Cache** (`bifrost/cache.py`)
+  - JSON storage in .cache/ directory
+  - 24-hour TTL
+  - SHA256 hash keys
+  - Automatic expired cache cleanup
 
 ### 3. 운영 편의성
 
