@@ -1,0 +1,27 @@
+# Bifrost 설정 파일 예시
+# 복사: cp bifrost.yaml.example bifrost.yaml
+
+# Ollama 로컬 모드 설정
+ollama:
+  url: http://localhost:11434
+  model: mistral  # 또는 llama2, codellama, etc.
+  timeout: 120
+  max_retries: 3
+
+# AWS Bedrock 클라우드 모드 설정
+bedrock:
+  region: us-east-1
+  model: anthropic.claude-3-sonnet-20240229-v1:0
+  profile: default  # AWS CLI 프로파일
+
+# 로그 전처리 설정
+log:
+  max_size_mb: 5        # 최대 로그 크기 (MB)
+  truncate: true        # 크기 초과 시 자르기
+  remove_timestamps: false  # 타임스탬프 제거 여부
+
+# 출력 설정
+output:
+  format: markdown      # markdown, json, plain
+  color: true          # 컬러 출력
+  verbose: false       # 상세 출력
