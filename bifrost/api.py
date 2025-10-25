@@ -547,6 +547,194 @@ async def get_log_statistics(
     return stats
 
 
+# ==================== 프롬프트 관리 엔드포인트 ====================
+
+@app.post("/api/prompts")
+async def create_prompt(
+    name: str = Field(..., description="프롬프트 이름"),
+    content: str = Field(..., description="프롬프트 내용"),
+    description: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    api_key: str = Depends(verify_api_key)
+):
+    """프롬프트 템플릿 생성"""
+    from bifrost.prompt_editor import PromptEditor
+    
+    editor = PromptEditor()
+    prompt_id = editor.create_prompt(
+        name=name,
+        content=content,
+        description=description,
+        tags=tags or []
+    )
+    
+    return {
+        "prompt_id": prompt_id,
+        "message": f"Prompt '{name}' created successfully"
+    }
+
+
+@app.get("/api/prompts")
+async def list_prompts(
+    tags: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 50,
+    api_key: str = Depends(verify_api_key)
+):
+    """프롬프트 템플릿 리스트"""
+    from bifrost.prompt_editor import PromptEditor
+    
+    editor = PromptEditor()
+    tag_list = tags.split(',') if tags else None
+    prompts = editor.list_prompts(tags=tag_list, search=search, limit=limit)
+    
+    return {
+        "prompts": prompts,
+        "count": len(prompts)
+    }
+
+
+@app.get("/api/prompts/{prompt_id}")
+async def get_prompt(
+    prompt_id: int,
+    api_key: str = Depends(verify_api_key)
+):
+    """프롬프트 템플릿 조회"""
+    from bifrost.prompt_editor import PromptEditor
+    
+    editor = PromptEditor()
+    prompt = editor.get_prompt(prompt_id)
+    
+    if not prompt:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    
+    return prompt
+
+
+@app.put("/api/prompts/{prompt_id}")
+async def update_prompt(
+    prompt_id: int,
+    content: Optional[str] = None,
+    description: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    api_key: str = Depends(verify_api_key)
+):
+    """프롬프트 템플릿 업데이트"""
+    from bifrost.prompt_editor import PromptEditor
+    
+    editor = PromptEditor()
+    success = editor.update_prompt(
+        prompt_id=prompt_id,
+        content=content,
+        description=description,
+        tags=tags
+    )
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    
+    return {"message": "Prompt updated successfully"}
+
+
+@app.delete("/api/prompts/{prompt_id}")
+async def delete_prompt(
+    prompt_id: int,
+    api_key: str = Depends(verify_api_key)
+):
+    """프롬프트 템플릿 삭제"""
+    from bifrost.prompt_editor import PromptEditor
+    
+    editor = PromptEditor()
+    success = editor.delete_prompt(prompt_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    
+    return {"message": "Prompt deleted successfully"}
+
+
+# ==================== MLflow 엔드포인트 ====================
+
+@app.get("/api/mlflow/experiments")
+async def get_mlflow_experiments(
+    api_key: str = Depends(verify_api_key)
+):
+    """MLflow 실험 정보 조회"""
+    from bifrost.mlflow_tracker import MLflowTracker
+    
+    tracker = MLflowTracker()
+    if not tracker.enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="MLflow not available. Install with: pip install mlflow"
+        )
+    
+    experiment = tracker.get_experiment_info()
+    return experiment or {}
+
+
+@app.get("/api/mlflow/runs")
+async def search_mlflow_runs(
+    filter: Optional[str] = None,
+    max_results: int = 100,
+    api_key: str = Depends(verify_api_key)
+):
+    """MLflow Run 검색"""
+    from bifrost.mlflow_tracker import MLflowTracker
+    
+    tracker = MLflowTracker()
+    if not tracker.enabled:
+        raise HTTPException(status_code=503, detail="MLflow not available")
+    
+    runs = tracker.search_runs(
+        filter_string=filter,
+        max_results=max_results
+    )
+    
+    return {
+        "runs": runs,
+        "count": len(runs)
+    }
+
+
+@app.get("/api/mlflow/runs/{run_id}")
+async def get_mlflow_run(
+    run_id: str,
+    api_key: str = Depends(verify_api_key)
+):
+    """MLflow Run 상세 조회"""
+    from bifrost.mlflow_tracker import MLflowTracker
+    
+    tracker = MLflowTracker()
+    if not tracker.enabled:
+        raise HTTPException(status_code=503, detail="MLflow not available")
+    
+    run = tracker.get_run(run_id)
+    
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    
+    return run
+
+
+@app.post("/api/mlflow/runs/compare")
+async def compare_mlflow_runs(
+    run_ids: List[str] = Field(..., description="비교할 Run ID 리스트"),
+    metric_names: Optional[List[str]] = None,
+    api_key: str = Depends(verify_api_key)
+):
+    """MLflow Run 비교"""
+    from bifrost.mlflow_tracker import MLflowTracker
+    
+    tracker = MLflowTracker()
+    if not tracker.enabled:
+        raise HTTPException(status_code=503, detail="MLflow not available")
+    
+    comparison = tracker.compare_runs(run_ids, metric_names)
+    
+    return comparison
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
