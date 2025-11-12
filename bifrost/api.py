@@ -109,6 +109,45 @@ class MetricsResponse(BaseModel):
     model_stats: List[dict]
 
 
+class FilterSeverityRequest(BaseModel):
+    """심각도 필터링 요청"""
+    log_content: str = Field(..., description="로그 내용")
+    min_level: SeverityLevel = Field(SeverityLevel.INFO, description="최소 심각도")
+
+
+class FilterErrorsRequest(BaseModel):
+    """에러 필터링 요청"""
+    log_content: str = Field(..., description="로그 내용")
+
+
+class FilterKeywordsRequest(BaseModel):
+    """키워드 필터링 요청"""
+    log_content: str = Field(..., description="로그 내용")
+    keywords: List[str] = Field(..., description="키워드 목록")
+    case_sensitive: bool = Field(False, description="대소문자 구분")
+
+
+class SlackNotificationRequest(BaseModel):
+    """Slack 알림 요청"""
+    webhook_url: str = Field(..., description="Slack Webhook URL")
+    result: dict = Field(..., description="분석 결과")
+    service_name: Optional[str] = Field(None, description="서비스 이름")
+
+
+class CreatePromptRequest(BaseModel):
+    """프롬프트 생성 요청"""
+    name: str = Field(..., description="프롬프트 이름")
+    content: str = Field(..., description="프롬프트 내용")
+    description: Optional[str] = Field(None, description="프롬프트 설명")
+    tags: Optional[List[str]] = Field(None, description="태그 목록")
+
+
+class CompareMLflowRunsRequest(BaseModel):
+    """MLflow Run 비교 요청"""
+    run_ids: List[str] = Field(..., description="비교할 Run ID 리스트")
+    metric_names: Optional[List[str]] = Field(None, description="메트릭 이름 목록")
+
+
 # ==================== Dependencies ====================
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None)) -> bool:
@@ -147,15 +186,50 @@ async def health():
     except:
         pass
     
+    # Kafka 상태 확인
+    kafka_status = "disabled"
+    if kafka_consumer_manager or kafka_producer_manager:
+        kafka_status = "enabled"
+    
     return {
         "status": "healthy",
         "components": {
             "database": "ok",
             "ollama": "ok" if ollama_healthy else "unavailable",
             "bedrock": "ok" if is_bedrock_available() else "not_configured",
+            "kafka": kafka_status,
+            "heimdall_integration": "enabled" if kafka_consumer_manager else "disabled",
         },
         "timestamp": datetime.utcnow().isoformat(),
     }
+
+
+@app.get("/api/v1/heimdall/status")
+async def heimdall_integration_status(_: bool = Depends(verify_api_key)):
+    """Heimdall 연동 상태 확인"""
+    from bifrost.config import Config
+    config = Config()
+    
+    kafka_enabled = config.get("kafka.enabled", False)
+    heimdall_enabled = config.get("heimdall.enabled", False)
+    
+    status = {
+        "integration_enabled": kafka_enabled and heimdall_enabled,
+        "kafka": {
+            "enabled": kafka_enabled,
+            "bootstrap_servers": config.get("kafka.bootstrap_servers"),
+            "consumer_running": kafka_consumer_manager is not None,
+            "producer_running": kafka_producer_manager is not None,
+        },
+        "heimdall": {
+            "enabled": heimdall_enabled,
+            "callback_topic": config.get("heimdall.callback_topic"),
+            "ai_source": config.get("heimdall.ai_source"),
+        },
+        "topics": config.get("kafka.topics", {}),
+    }
+    
+    return status
 
 
 @app.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(verify_api_key)])
@@ -344,17 +418,77 @@ async def list_api_keys():
 
 # ==================== Startup/Shutdown ====================
 
+# Kafka 통합 관련 전역 변수
+kafka_consumer_manager = None
+kafka_producer_manager = None
+
 @app.on_event("startup")
 async def startup_event():
     """서버 시작 시"""
+    global kafka_consumer_manager, kafka_producer_manager
+    
+    # Database 초기화
     db = get_database()
     db.init_db()
     print("🌈 Bifrost API Server started!")
+    
+    # Kafka 통합 활성화 (설정 기반)
+    from bifrost.config import Config
+    config = Config()
+    
+    kafka_enabled = config.get("kafka.enabled", False)
+    heimdall_enabled = config.get("heimdall.enabled", False)
+    
+    if kafka_enabled and heimdall_enabled:
+        try:
+            from bifrost.kafka_consumer import KafkaConsumerManager
+            from bifrost.kafka_producer import KafkaProducerManager
+            from bifrost.heimdall_integration import HeimdallIntegrationService
+            
+            # Producer 초기화
+            kafka_config = config.get("kafka", {})
+            kafka_producer_manager = KafkaProducerManager(kafka_config)
+            await kafka_producer_manager.start()
+            
+            # Integration Service 초기화
+            integration_service = HeimdallIntegrationService(
+                config=config.data,
+                producer_manager=kafka_producer_manager
+            )
+            
+            # Consumer 초기화 및 시작
+            kafka_consumer_manager = KafkaConsumerManager(kafka_config)
+            await kafka_consumer_manager.start(
+                integration_service.process_analysis_request
+            )
+            
+            logger.info(
+                "Kafka integration enabled - Heimdall 연동 시작됨",
+                bootstrap_servers=kafka_config.get("bootstrap_servers")
+            )
+            print("🔗 Kafka integration with Heimdall enabled!")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Kafka integration: {e}", exc_info=True)
+            print(f"⚠️  Kafka integration failed: {e}")
+    else:
+        print("ℹ️  Kafka integration disabled (CLI mode)")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """서버 종료 시"""
+    global kafka_consumer_manager, kafka_producer_manager
+    
+    # Kafka 리소스 정리
+    if kafka_consumer_manager:
+        await kafka_consumer_manager.stop()
+        print("🛑 Kafka consumer stopped")
+    
+    if kafka_producer_manager:
+        await kafka_producer_manager.stop()
+        print("🛑 Kafka producer stopped")
+    
     print("👋 Bifrost API Server shutting down...")
 
 
@@ -491,12 +625,11 @@ async def export_json(
 
 @app.post("/api/filter/severity")
 async def filter_by_severity(
-    log_content: str = Field(..., description="로그 내용"),
-    min_level: SeverityLevel = Field(SeverityLevel.INFO, description="최소 심각도"),
+    request: FilterSeverityRequest,
     api_key: str = Depends(verify_api_key)
 ):
     """심각도로 필터링"""
-    filtered = LogFilter.filter_by_severity(log_content, min_level)
+    filtered = LogFilter.filter_by_severity(request.log_content, request.min_level)
     stats = LogFilter.get_log_statistics(filtered)
     
     return {
@@ -507,11 +640,11 @@ async def filter_by_severity(
 
 @app.post("/api/filter/errors")
 async def filter_errors_only(
-    log_content: str = Field(..., description="로그 내용"),
+    request: FilterErrorsRequest,
     api_key: str = Depends(verify_api_key)
 ):
     """에러만 추출"""
-    filtered = LogFilter.extract_errors_only(log_content)
+    filtered = LogFilter.extract_errors_only(request.log_content)
     
     return {
         "filtered_log": filtered,
@@ -521,14 +654,12 @@ async def filter_errors_only(
 
 @app.post("/api/slack/send")
 async def send_to_slack(
-    webhook_url: str = Field(..., description="Slack Webhook URL"),
-    result: dict = Field(..., description="분석 결과"),
-    service_name: Optional[str] = None,
+    request: SlackNotificationRequest,
     api_key: str = Depends(verify_api_key)
 ):
     """분석 결과를 Slack으로 전송"""
-    slack = SlackNotifier(webhook_url)
-    success = slack.send_analysis_result(result, service_name)
+    slack = SlackNotifier(request.webhook_url)
+    success = slack.send_analysis_result(request.result, request.service_name)
     
     return {
         "success": success,
@@ -551,10 +682,7 @@ async def get_log_statistics(
 
 @app.post("/api/prompts")
 async def create_prompt(
-    name: str = Field(..., description="프롬프트 이름"),
-    content: str = Field(..., description="프롬프트 내용"),
-    description: Optional[str] = None,
-    tags: Optional[List[str]] = None,
+    request: CreatePromptRequest,
     api_key: str = Depends(verify_api_key)
 ):
     """프롬프트 템플릿 생성"""
@@ -562,15 +690,15 @@ async def create_prompt(
     
     editor = PromptEditor()
     prompt_id = editor.create_prompt(
-        name=name,
-        content=content,
-        description=description,
-        tags=tags or []
+        name=request.name,
+        content=request.content,
+        description=request.description,
+        tags=request.tags or []
     )
     
     return {
         "prompt_id": prompt_id,
-        "message": f"Prompt '{name}' created successfully"
+        "message": f"Prompt '{request.name}' created successfully"
     }
 
 
@@ -719,8 +847,7 @@ async def get_mlflow_run(
 
 @app.post("/api/mlflow/runs/compare")
 async def compare_mlflow_runs(
-    run_ids: List[str] = Field(..., description="비교할 Run ID 리스트"),
-    metric_names: Optional[List[str]] = None,
+    request: CompareMLflowRunsRequest,
     api_key: str = Depends(verify_api_key)
 ):
     """MLflow Run 비교"""
@@ -730,7 +857,7 @@ async def compare_mlflow_runs(
     if not tracker.enabled:
         raise HTTPException(status_code=503, detail="MLflow not available")
     
-    comparison = tracker.compare_runs(run_ids, metric_names)
+    comparison = tracker.compare_runs(request.run_ids, request.metric_names)
     
     return comparison
 

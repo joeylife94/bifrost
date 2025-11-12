@@ -28,6 +28,38 @@ DEFAULT_CONFIG = {
         "color": True,
         "verbose": False,
     },
+    # Kafka 설정 (MSA Integration with Heimdall)
+    "kafka": {
+        "enabled": False,  # 기본적으로 비활성화 (CLI 모드)
+        "bootstrap_servers": "localhost:9092",
+        "consumer": {
+            "group_id": "bifrost-consumer-group",
+            "auto_offset_reset": "earliest",
+            "enable_auto_commit": False,
+            "max_poll_records": 100,
+            "session_timeout_ms": 30000,
+        },
+        "producer": {
+            "acks": "all",
+            "retries": 3,
+            "max_in_flight_requests_per_connection": 1,
+            "compression_type": "snappy",
+        },
+        "topics": {
+            "analysis_request": "analysis.request",
+            "analysis_result": "analysis.result",
+            "dlq": "dlq.failed",
+        },
+    },
+    # Heimdall 연동 설정
+    "heimdall": {
+        "enabled": False,  # Heimdall 연동 활성화 여부
+        "callback_topic": "analysis.result",
+        "timeout_seconds": 60,
+        "retry_attempts": 3,
+        "retry_backoff_seconds": 5,
+        "ai_source": "local",  # local (Ollama) or cloud (Bedrock)
+    },
 }
 
 
@@ -91,6 +123,16 @@ class Config:
             config["bedrock"]["region"] = region
         if bedrock_model := os.getenv("BIFROST_BEDROCK_MODEL"):
             config["bedrock"]["model"] = bedrock_model
+        
+        # Kafka 환경변수
+        if kafka_servers := os.getenv("KAFKA_BOOTSTRAP_SERVERS"):
+            config["kafka"]["bootstrap_servers"] = kafka_servers
+        if kafka_enabled := os.getenv("KAFKA_ENABLED"):
+            config["kafka"]["enabled"] = kafka_enabled.lower() in ("true", "1", "yes")
+        
+        # Heimdall 환경변수
+        if heimdall_enabled := os.getenv("HEIMDALL_ENABLED"):
+            config["heimdall"]["enabled"] = heimdall_enabled.lower() in ("true", "1", "yes")
         
         return config
     
